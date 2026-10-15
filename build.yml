@@ -1,0 +1,209 @@
+name: build klickho
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.12
+      - name: Write project files
+        run: |
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.4
+          yarn_mappings=1.21.4+build.8
+          loader_version=0.16.14
+          fabric_version=0.119.4+1.21.4
+          mod_version=1.0.0
+          maven_group=dev.klickho
+          archives_base_name=klickho
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'fabric-loom' version '1.9-SNAPSHOT'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "klickho",
+            "version": "${version}",
+            "name": "klickho",
+            "description": "klickho - custom HUD",
+            "authors": ["klickho"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["dev.klickho.KlickhoClient"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "~1.21.4",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EOF
+          mkdir -p src/main/resources/assets/klickho/lang
+          cat > src/main/resources/assets/klickho/lang/en_us.json <<'EOF'
+          {
+            "category.klickho": "klickho",
+            "key.klickho.hud": "Toggle HUD",
+            "key.klickho.coords": "Toggle coordinates",
+            "key.klickho.clock": "Toggle clock"
+          }
+          EOF
+          mkdir -p src/main/java/dev/klickho
+          cat > src/main/java/dev/klickho/KlickhoClient.java <<'EOF'
+          package dev.klickho;
+
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+          import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.network.PlayerListEntry;
+          import net.minecraft.client.option.KeyBinding;
+          import net.minecraft.client.render.RenderTickCounter;
+          import net.minecraft.client.util.InputUtil;
+          import org.lwjgl.glfw.GLFW;
+
+          import java.time.LocalTime;
+          import java.time.format.DateTimeFormatter;
+
+          /** klickho: a small, clean client-side HUD. */
+          public class KlickhoClient implements ClientModInitializer {
+              public static final String NAME = "klickho";
+
+              private static final int ACCENT = 0xFF8A5CFF;
+              private static final int BG     = 0xA0101018;
+              private static final int TEXT   = 0xFFEDEDF5;
+              private static final int DIM    = 0xFF9A9AB0;
+
+              private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
+
+              private static boolean hudOn = true;
+              private static boolean coordsOn = true;
+              private static boolean clockOn = true;
+
+              private static KeyBinding keyHud;
+              private static KeyBinding keyCoords;
+              private static KeyBinding keyClock;
+
+              @Override
+              public void onInitializeClient() {
+                  keyHud = bind("key.klickho.hud", GLFW.GLFW_KEY_RIGHT_SHIFT);
+                  keyCoords = bind("key.klickho.coords", GLFW.GLFW_KEY_UNKNOWN);
+                  keyClock = bind("key.klickho.clock", GLFW.GLFW_KEY_UNKNOWN);
+
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      while (keyHud.wasPressed()) hudOn = !hudOn;
+                      while (keyCoords.wasPressed()) coordsOn = !coordsOn;
+                      while (keyClock.wasPressed()) clockOn = !clockOn;
+                  });
+
+                  HudRenderCallback.EVENT.register(KlickhoClient::render);
+              }
+
+              private static KeyBinding bind(String id, int key) {
+                  return KeyBindingHelper.registerKeyBinding(
+                          new KeyBinding(id, InputUtil.Type.KEYSYM, key, "category.klickho"));
+              }
+
+              private static void render(DrawContext ctx, RenderTickCounter tick) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (!hudOn || mc.player == null || mc.options.hudHidden) return;
+                  TextRenderer tr = mc.textRenderer;
+
+                  // Top-left: name | fps | ping | time
+                  String info = mc.getCurrentFps() + " fps   " + ping(mc) + " ms";
+                  if (clockOn) info += "   " + LocalTime.now().format(CLOCK);
+                  int pad = 4;
+                  int nameW = tr.getWidth(NAME);
+                  int infoW = tr.getWidth(info);
+                  int x = 6, y = 6, h = tr.fontHeight + pad * 2;
+                  int w = pad + nameW + 8 + infoW + pad;
+                  ctx.fill(x, y, x + w, y + h, BG);
+                  ctx.fill(x, y, x + 2, y + h, ACCENT);
+                  ctx.drawTextWithShadow(tr, NAME, x + pad + 2, y + pad, ACCENT);
+                  ctx.drawTextWithShadow(tr, info, x + pad + 2 + nameW + 8, y + pad, TEXT);
+
+                  // Below it: coordinates + facing
+                  if (coordsOn) {
+                      String xyz = mc.player.getBlockX() + ", " + mc.player.getBlockY() + ", " + mc.player.getBlockZ();
+                      String dir = capitalize(mc.player.getHorizontalFacing().asString());
+                      int cw = pad + tr.getWidth(xyz) + 8 + tr.getWidth(dir) + pad;
+                      int cy = y + h + 3;
+                      ctx.fill(x, cy, x + cw, cy + h, BG);
+                      ctx.fill(x, cy, x + 2, cy + h, ACCENT);
+                      ctx.drawTextWithShadow(tr, xyz, x + pad + 2, cy + pad, TEXT);
+                      ctx.drawTextWithShadow(tr, dir, x + pad + 2 + tr.getWidth(xyz) + 8, cy + pad, DIM);
+                  }
+              }
+
+              private static int ping(MinecraftClient mc) {
+                  if (mc.getNetworkHandler() == null || mc.player == null) return 0;
+                  PlayerListEntry e = mc.getNetworkHandler().getPlayerListEntry(mc.player.getUuid());
+                  return e == null ? 0 : e.getLatency();
+              }
+
+              private static String capitalize(String s) {
+                  return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+              }
+          }
+          EOF
+      - name: Build
+        run: gradle build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: klickho
+          path: build/libs/*.jar
